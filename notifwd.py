@@ -15,6 +15,8 @@ from sys import argv, maxsize, stdout
 import argparse
 from os import environ
 from itertools import cycle
+import http.client, urllib
+import pdb
 
 # I have been writing a lot of Java and am probably not supposed to
 # put everything into one class like this.
@@ -27,8 +29,13 @@ class Notification:
             description="notifwd v%s - macOS notification forwarder" % __version__,
             prog="notifwd")
         parser.add_argument("--api-key", "-k",
-                            help="Prowl API key",
-                            default=environ.get("PROWL_API_KEY"))
+                            help="PushOver API key",
+                            default=environ.get("PUSHOVER_API_KEY"))
+
+        parser.add_argument("--user-key", "-u",
+                            help="PushOver API key",
+                            default=environ.get("PUSHOVER_USER_KEY"))
+
         parser.add_argument("--frequency", "-f", type=int,
                             help="Frequency, in seconds, to check for new notifications.",
                             default=60)
@@ -43,11 +50,14 @@ class Notification:
             print("notifwd v%s" % __version__)
             raise SystemExit()
         if args.api_key is None:
-            parser.error("no API key specified. Is $PROWL_API_KEY defined?")
+            parser.error("no API key specified. Is $PUSHOVER_API_KEY defined?")
+        if args.user_key is None:
+            parser.error("no UUSER key specified. Is $PUSHOVER_USER_KEY defined?")
         if args.frequency <= 0:
             parser.error("frequency must be a positive integer.")
         # Store command-line arguments in static fields.
         Notification.API_KEY = args.api_key
+        Notification.USER_KEY = args.user_key
         Notification.FREQ = args.frequency
         Notification.SILENT = args.silent
         Notification.TEST = args.test
@@ -195,10 +205,13 @@ notifwd by Jordan Mann. Starting up... """, end="")
     # Send a notification to the Prowl API.
     def send(self):
         if not Notification.SILENT: print("\nSending notification from", self)
-        r = requests.post("https://api.prowlapp.com/publicapi/add",
-                          data={"apikey": Notification.API_KEY, "application": self.app,
-                                "event": self.title, "description": self.text})
-        
+
+        r = requests.post("https://api.pushover.net/1/messages.json",
+                            data={  "token": Notification.API_KEY,
+                                    "user": Notification.USER_KEY,
+                                    "message": f"{self.app}: {self.title} \n {self.text}",
+                        } )
+
         if r.status_code != 200:
             print("Received unexpected status code", r.status_code, r.reason, "response:\n", r.text)
 
