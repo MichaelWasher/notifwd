@@ -15,50 +15,82 @@ from sys import argv, maxsize, stdout
 import argparse
 from os import environ
 from itertools import cycle
+import pyfiglet
 
 # I have been writing a lot of Java and am probably not supposed to
 # put everything into one class like this.
 class Notification:
-    
     @staticmethod
-    def setup(argv):
-        # Parse the command-line arguments.
+    def parse_args(argv):
         parser = argparse.ArgumentParser(
             description="notifwd v%s - macOS notification forwarder" % __version__,
             prog="notifwd")
+        
+        parser.add_argument("--provider", "-p", help=f"The push-notification plugin to forward notifications to. Current options are {[k for k, _ in PROVIDERS.items()]}. Is also set using the `{APP_NAME.upper()}_PROVIDER` environment variable", 
+                            default=environ.get(f"{APP_NAME.upper()}_PROVIDER"))
+
         parser.add_argument("--api-key", "-k",
-                            help="Prowl API key",
-                            default=environ.get("PROWL_API_KEY"))
+                            help="API key for sending push notifications. Is also set using the `{APP_NAME.upper()}_API_KEY` environment variable", ",
+                            default=environ.get(f"{APP_NAME.upper()}_API_KEY "))
+
+        parser.add_argument("--user-key", "-u",
+                            help="Unique user key for sending push notifications. Is also set using the `{APP_NAME.upper()}_USER_KEY` environment variable", ",
+                            default=environ.get(f"{APP_NAME.upper()}_USER_KEY"))
+
         parser.add_argument("--frequency", "-f", type=int,
                             help="Frequency, in seconds, to check for new notifications.",
                             default=60)
         parser.add_argument("--version", action="store_true",
                             help="Get program version")
+
         parser.add_argument("--silent", "-s",
                             help="Don't display the splash screen or verbose logging.", action="store_true")
+                            
         parser.add_argument("--test", "-t",
                             help="Display a test notification on startup.", action="store_true")
-        args = parser.parse_args()
+        return parser.parse_args()
+
+    @staticmethod
+    def validate_args(args):
+        if args.provider == None or type(args.provider) is not str:
+            args.provider = "default"
+        
+        args.provider = args.provider.lower()
+
+        if PROVIDERS.get(args.provider) == None:
+            args.provider = "default"
+        
+        if args.frequency <= 0:
+            raise Exception("frequency must be a positive integer.")
+        
+        PROVIDERS[args.provider].validate_args(args)
+        
+    @staticmethod
+    def setup(argv):
+        # Parse the command-line arguments.
+        args = Notification.parse_args(argv)
+
         if args.version:
             print("notifwd v%s" % __version__)
             raise SystemExit()
-        if args.api_key is None:
-            parser.error("no API key specified. Is $PROWL_API_KEY defined?")
-        if args.frequency <= 0:
-            parser.error("frequency must be a positive integer.")
-        # Store command-line arguments in static fields.
-        Notification.API_KEY = args.api_key
+        
+        # Verify arguments
+        err = Notification.validate_args(args)
+        if err != None:
+            exit(err)
+
+        # Set notification values
         Notification.FREQ = args.frequency
         Notification.SILENT = args.silent
         Notification.TEST = args.test
-        if not Notification.SILENT: print("""
-  _   _       _   _ _____             _ 
- | \ | | ___ | |_(_)  ___|_      ____| |
- |  \| |/ _ \| __| | |_  \ \ /\ / / _` |
- | |\  | (_) | |_| |  _|  \ V  V / (_| |
- |_| \_|\___/ \__|_|_|     \_/\_/ \__,_|
 
-notifwd by Jordan Mann. Starting up... """, end="")
+        # Configure provider
+        Notification.PROVIDER = PROVIDERS[args.provider](args)
+
+        if not Notification.SILENT:
+            print(pyfiglet.figlet_format(APP_NAME))
+            print(f"Using provider {args.provider}")
+
         # Get the system temp directory macOS is caching to.
         tmp_path = subprocess.run(["getconf", "DARWIN_USER_DIR"], stdout=subprocess.PIPE).stdout
         # Locate the database; start SQLite.
@@ -195,12 +227,64 @@ notifwd by Jordan Mann. Starting up... """, end="")
     # Send a notification to the Prowl API.
     def send(self):
         if not Notification.SILENT: print("\nSending notification from", self)
-        r = requests.post("https://api.prowlapp.com/publicapi/add",
-                          data={"apikey": Notification.API_KEY, "application": self.app,
-                                "event": self.title, "description": self.text})
         
-        if r.status_code != 200:
-            print("Received unexpected status code", r.status_code, r.reason, "response:\n", r.text)
+        response = Notification.PROVIDER.send_notification(app=self.app, title=self.title, text=self.text)
+
+        if response.status_code != 200:
+            print("Received unexpected status code", response.status_code, response.reason, "response:\n", response.text)
+
+
+# List of providers
+class PushOver():
+    def __init__(self, args):
+        self.url_endpoint = "https://api.pushover.net/1/messages.json"
+        self.api_key = args.api_key
+        self.user_key = args.user_key
+
+    
+    def send_notification(self, app, title, text):
+        resp = requests.post(self.url_endpoint,
+                            data={  "token": self.api_key,
+                                    "user": self.user_key,
+                                    "message": f"{app}: {title} \n {text}",
+                        } )
+
+        return resp
+    
+    # TODO Move adding args to parsers in the Provider, making the plugin fully independent
+    @staticmethod
+    def validate_args(args):
+        if args.api_key is None:
+            raise Exception(f"no API key specified. Is ${APP_NAME.upper()}_API_KEY defined?")
+        if args.user_key is None:
+            raise Exception(f"no USER key specified. Is ${APP_NAME.upper()}_USER_KEY defined?")
+
+                        
+class Prowl:
+    def __init__(self, args):
+        self.url_endpoint = "https://api.prowlapp.com/publicapi/add"
+        self.api_key = args.api_key
+
+
+    def send_notification(self, app, title, text):
+        resp = requests.post(self.url_endpoint,
+            data={"apikey": self.api_key, "application": app,
+                "event": title, "description": text})
+
+        return resp
+    
+    # TODO Move adding args to parsers in the Provider, making the plugin fully independent
+    @staticmethod
+    def validate_args(args):
+        if args.api_key is None:
+            raise Exception(f"no API key specified. Is ${APP_NAME.upper()}_API_KEY defined?")
+
+
+# Project-wide values
+APP_NAME="notifwd"
+PROVIDERS={"prowl": Prowl,
+            "pushover": PushOver,
+            "default": Prowl}
 
 if __name__ == "__main__":
     Notification.main(argv)
